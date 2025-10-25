@@ -1,0 +1,177 @@
+// Autor: Fábio Henrique Cabrini
+// Resumo: Programa para ESP32 que lê temperatura, umidade e luminosidade,
+// controla LED onboard e publica todos os dados em formato JSON no Broker MQTT.
+// Revisão técnica e integração FIWARE JSON: ChatGPT, 24-10-2025
+
+#include <WiFi.h>
+#include <PubSubClient.h>
+#include "DHT.h"
+
+// ========================= CONFIGURAÇÕES EDITÁVEIS =========================
+const char* WIFI_SSID = "FIAP-IOT";        
+const char* WIFI_PASSWORD = "F!@p25.IOT";  
+const char* BROKER_MQTT = "54.221.163.3"; 
+const int BROKER_PORT = 1883;         
+const int LED_PIN = 2; // LED onboard do ESP32
+
+// ========================= CONFIGURAÇÕES DO DISPOSITIVO =========================
+const char* TOPICO_SUBSCRIBE = "/TEF/device001/cmd";      
+const char* TOPICO_PUBLISH_JSON = "/TEF/device001/attrs";   // Publica o JSON completo
+const char* ID_MQTT = "fiware_001";                       
+const char* topicPrefix = "device001";                           
+
+// ========================= SENSOR DHT =========================
+#define DHTPIN 4      
+#define DHTTYPE DHT11
+DHT dht(DHTPIN, DHTTYPE);
+
+// ========================= VARIÁVEIS GLOBAIS =========================
+WiFiClient espClient;
+PubSubClient MQTT(espClient);
+char EstadoSaida = '0';
+
+// ========================= DECLARAÇÃO DE FUNÇÕES =========================
+void reconectWiFi();
+void reconnectMQTT();
+void mqtt_callback(char* topic, byte* payload, unsigned int length);
+void handleSensorsAndPublish();
+void EnviaEstadoOutputMQTT();
+void VerificaConexoesWiFIEMQTT();
+
+// ========================= SETUP =========================
+void setup() {
+  Serial.begin(115200);
+  pinMode(LED_PIN, OUTPUT);
+  digitalWrite(LED_PIN, LOW);
+
+  dht.begin();
+  
+  reconectWiFi();
+  MQTT.setServer(BROKER_MQTT, BROKER_PORT);
+  MQTT.setCallback(mqtt_callback);
+
+  Serial.println("=== Sistema Iniciado com Sucesso ===");
+}
+
+// ========================= LOOP PRINCIPAL =========================
+void loop() {
+  VerificaConexoesWiFIEMQTT();
+
+  handleSensorsAndPublish(); // lê DHT e LDR e publica JSON
+  EnviaEstadoOutputMQTT();   // publica estado do LED
+
+  MQTT.loop();
+  delay(5000); // publica a cada 5 segundos
+}
+
+// ========================= CONEXÃO WI-FI =========================
+void reconectWiFi() {
+  if (WiFi.status() == WL_CONNECTED) return;
+
+  Serial.println("Conectando ao Wi-Fi...");
+  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+
+  Serial.println("\nConectado com sucesso!");
+  Serial.print("IP obtido: ");
+  Serial.println(WiFi.localIP());
+}
+
+// ========================= CONEXÃO MQTT =========================
+void reconnectMQTT() {
+  while (!MQTT.connected()) {
+    Serial.print("* Tentando conectar ao Broker MQTT: ");
+    Serial.println(BROKER_MQTT);
+
+    if (MQTT.connect(ID_MQTT)) {
+      Serial.println("Conectado com sucesso ao broker MQTT!");
+      MQTT.subscribe(TOPICO_SUBSCRIBE);
+    } else {
+      Serial.println("Falha ao conectar. Tentando novamente em 2s...");
+      delay(2000);
+    }
+  }
+}
+
+// ========================= VERIFICA CONEXÕES =========================
+void VerificaConexoesWiFIEMQTT() {
+  if (!MQTT.connected()) reconnectMQTT();
+  if (WiFi.status() != WL_CONNECTED) reconectWiFi();
+}
+
+// ========================= CALLBACK MQTT =========================
+void mqtt_callback(char* topic, byte* payload, unsigned int length) {
+  String msg;
+  for (int i = 0; i < length; i++) {
+    msg += (char)payload[i];
+  }
+
+  Serial.print("- Mensagem recebida: ");
+  Serial.println(msg);
+
+  if (msg == "device001@on|") {
+    digitalWrite(LED_PIN, HIGH);
+    EstadoSaida = '1';
+  } 
+  else if (msg == "device001@off|") {
+    digitalWrite(LED_PIN, LOW);
+    EstadoSaida = '0';
+  }
+}
+
+// ========================= PUBLICA ESTADO DO LED =========================
+void EnviaEstadoOutputMQTT() {
+  if (EstadoSaida == '1') {
+    MQTT.publish(TOPICO_PUBLISH_JSON, "{\"led\":\"on\"}");
+    Serial.println("- LED Ligado");
+  } else {
+    MQTT.publish(TOPICO_PUBLISH_JSON, "{\"led\":\"off\"}");
+    Serial.println("- LED Desligado");
+  }
+}
+
+// ========================= SENSOR DHT E LUMINOSIDADE =========================
+void handleSensorsAndPublish() {
+  // Leitura dos sensores
+  float umidade = dht.readHumidity();
+  float temperatura = dht.readTemperature();
+  const int ldrPin = 34;
+  int valorLDR = analogRead(ldrPin);
+  int luminosidade = map(valorLDR, 0, 4095, 0, 100);
+
+  // Verificação de leitura do DHT
+  if (isnan(umidade) || isnan(temperatura)) {
+    Serial.println("Falha ao ler o sensor DHT11!");
+    return;
+  }
+
+  // Exibe os valores no Serial Monitor
+  Serial.println("===== Leitura dos Sensores =====");
+  Serial.print("Temperatura: ");
+  Serial.print(temperatura);
+  Serial.println(" °C");
+  Serial.print("Umidade: ");
+  Serial.print(umidade);
+  Serial.println(" %");
+  Serial.print("Luminosidade: ");
+  Serial.print(luminosidade);
+  Serial.println(" %");
+  Serial.println("===============================");
+
+  // Cria o JSON
+  String json = "{";
+  json += "\"temperatura\":" + String(temperatura, 1) + ",";
+  json += "\"umidade\":" + String(umidade, 1) + ",";
+  json += "\"luminosidade\":" + String(luminosidade);
+  json += "}";
+
+  // Publica no Broker
+  MQTT.publish(TOPICO_PUBLISH_JSON, json.c_str());
+  Serial.println("JSON enviado ao broker MQTT:");
+  Serial.println(json);
+  Serial.println();
+}
